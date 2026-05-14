@@ -110,13 +110,40 @@ jobs:
           sha256sum release/geosite.dat > release/geosite.dat.sha256sum
           cat release/geosite.dat.sha256sum
 
-      - name: Create release and upload geosite.dat
+
+      - name: Generate new hash and check against latest release
+        id: verify_diff
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          sha256sum release/geosite.dat | awk '{print $1}' > release/current_hash.txt
+          NEW_HASH=$(cat release/current_hash.txt)
+          echo "New hash: $NEW_HASH"
+
+          gh release download --pattern "geosite.dat.sha256sum" --repo $GITHUB_REPOSITORY --output release/old_hash_file || echo "First release" > release/old_hash_file
+
+          OLD_HASH=$(awk '{print $1}' release/old_hash_file || echo "none")
+          echo "Old hash: $OLD_HASH"
+
+          if [ "$NEW_HASH" == "$OLD_HASH" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Content is identical to the latest release. No update needed."
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Content has changed. New release will be created."
+          fi
+
+      - name: Create release and upload geosite.dat
+        if: steps.verify_diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Генерируем финальный файл суммы для загрузки
+          sha256sum release/geosite.dat > release/geosite.dat.sha256sum
+          
           gh release create "$TAG_NAME" release/geosite.dat release/geosite.dat.sha256sum \
             --repo $GITHUB_REPOSITORY \
             --title "$RELEASE_NAME" \
-            --notes "" \
+            --notes "Update detected from upstream. Automated build." \
             --draft=false \
             --prerelease=false
