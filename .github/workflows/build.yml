@@ -1,84 +1,61 @@
-name: Build
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 4 * * 0"
-  push:
-    branches: [ master ]
-    paths-ignore:
-      - "**/README.md"
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    env:
-      ANTIFILTER_DOWNLOAD: https://community.antifilter.download/list/domains.lst
-      REFILTER_ALL: https://raw.githubusercontent.com/1andrevich/Re-filter-lists/refs/heads/main/domains_all.lst
-      CUSTOM_DOMAINS: "jut.su habr.com 4pda.to"
-
-    steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v4
-        with:
-          path: code
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: code/go.mod
-
-      - name: Set release tags
-        run: |
-          echo "RELEASE_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
-          echo "TAG_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
-
-      - name: Download data lists
+- name: Download data lists
         shell: bash
+        env:
+          CUSTOM_DOMAINS: "yaplakal.com habr.com"
         run: |
           set -euo pipefail
+          mkdir -p raw_data
           mkdir -p data
-          declare -A fetched
 
-          fetch_list() {
+          extract_all_domains() {
             local name="$1"
-            [[ "${fetched[$name]:-}" == "1" ]] && return
-            fetched[$name]=1
-            if curl --fail -s -o "data/$name" \
-              "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/$name"; then
-              readarray -t includes < <(
-                grep '^include:' "data/$name" \
-                  | cut -d':' -f2- \
-                  | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-                  || true
-              )
-              for inc in "${includes[@]}"; do
-                if [[ -n "$inc" ]]; then
-                  fetch_list "$inc"
-                fi
-              done
-            else
-              exit 1
+            local cache_file="raw_data/$name"
+            
+            if [[ ! -f "$cache_file" ]]; then
+              echo "Downloading $name..." >&2
+              curl --fail -s -L -o "$cache_file" \
+                "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/$name" || return 0
             fi
-          }
-          for root in category-ru apple private google-play youtube; do
-            fetch_list "$root"
-          done
-          
-      - name: Copy Twitch no ads list
-        run: |
-          cp -r code/data/twitch data/twitch || true
 
-      - name: Build Russia blocklist
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              line=$(echo "${line%%#*}" | xargs)
+              [[ -z "$line" ]] && continue
+
+              if [[ "$line" =~ ^include: ]]; then
+                local inc=$(echo "$line" | cut -d':' -f2- | xargs)
+                extract_all_domains "$inc"
+              else
+                echo "$line" | awk '{print $1}' | sed -E 's/^(full:|domain:|keyword:)//' | cut -d'@' -f1
+              fi
+            done < "$cache_file"
+          }
+
+          super_filter() {
+            awk -F. '{ print NF, $0 }' | sort -n | cut -d' ' -f2- | uniq | \
+            awk -F. '{
+              found = 0;
+              for (i = NF; i >= 1; i--) {
+                curr = "";
+                for (j = i; j <= NF; j++) {
+                  curr = (curr == "") ? $j : curr "." $j;
+                }
+                if (seen[curr]) { found = 1; break; }
+              }
+              if (!found) { seen[$0] = 1; print $0; }
+            }'
+          }
+
+          for target in category-ru private; do
+            echo "Processing $target..."
+            {
+              for d in $CUSTOM_DOMAINS; do echo "$d"; done
+              extract_all_domains "$target"
+            } | super_filter > "data/$target"
+          done
+
+      - name: Copy category-unblock-ru
         run: |
-          mkdir -p filtered
-          curl -sSL "$ANTIFILTER_DOWNLOAD" -o filtered/antifilter.lst
-          curl -sSL "$REFILTER_ALL" -o filtered/refilter.lst
-          (cat filtered/antifilter.lst filtered/refilter.lst | grep -E '\.(ru|su|xn--80adxhks|xn--80asehdb|xn--80aswg|xn--c1avg|xn--d1acj3b|xn--p1acf|xn--p1ai)$'; echo -e "${CUSTOM_DOMAINS// /\\n}") | sort | uniq > data/category-ban-ru
+          cp -r code/data/category-unblock-ru data/ 2>/dev/null || true
 
       - name: Build geosite.dat
         run: |
@@ -88,22 +65,4 @@ jobs:
           go run main.go \
             --datapath=../data \
             --outputdir=../release \
-            --exportlists=category-ban-ru,category-ru,twitch,youtube,private
-          cd ..
-          ls -R
-
-      - name: Generate geosite.dat sha256 hash
-        run: |
-          sha256sum release/geosite.dat > release/geosite.dat.sha256sum
-          cat release/geosite.dat.sha256sum
-
-      - name: Create release and upload geosite.dat
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$TAG_NAME" release/geosite.dat release/geosite.dat.sha256sum \
-            --repo $GITHUB_REPOSITORY \
-            --title "$RELEASE_NAME" \
-            --notes "" \
-            --draft=false \
-            --prerelease=false
+            --exportlists=category-unblock-ru,category-ru,private
