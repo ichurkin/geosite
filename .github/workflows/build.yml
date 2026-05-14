@@ -8,6 +8,8 @@ on:
     branches: [ master ]
     paths-ignore:
       - "**/README.md"
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -18,12 +20,12 @@ jobs:
 
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: code
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: code/go.mod
 
